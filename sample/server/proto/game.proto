@@ -1,0 +1,22 @@
+syntax = "proto2";
+
+package gs;
+
+message PlayerInfo {
+	required int32 id	= 1;
+	required bytes nick	= 2;
+	required int32 age	= 3;
+}
+
+message LoginRequest {
+    required int32 player_id = 1;
+}
+
+message LoginResponse {
+    required PlayerInfo pinfo = 1;
+}
+
+service GameService {
+    rpc login(LoginRequest) returns (LoginResponse);
+}
+

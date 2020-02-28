@@ -1,0 +1,8 @@
+protoc -I=./proto/ --cpp_out=./protocc/ game.proto 
+protoc -I=./proto/ --python_out=../client_py/ game.proto
+
+rm -rf build
+mkdir build
+cd build
+cmake ../
+make
