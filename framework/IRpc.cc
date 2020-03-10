@@ -98,7 +98,7 @@ int IRpc::SendRespond(int fd, int ret, const std::string& name, int datalen)
 	}
 	
 	PLOG_DEBUG("IRpc::SendRespond len=%d", rhead_->Len);
-	return server_->AsyncSendMsg(fd, databuff_ + sidx, rhead_->Len);
+	return server_->SendMsg(fd, databuff_ + sidx, rhead_->Len);
 }
 
 int IRpc::SendRequest(int fd, const std::string& name, int datalen)
@@ -111,7 +111,7 @@ int IRpc::SendRequest(int fd, const std::string& name, int datalen)
 		return -1;
 	}
 	
-	return server_->AsyncSendMsg(fd, databuff_ + sidx, rhead_->Len);
+	return server_->SendMsg(fd, databuff_ + sidx, rhead_->Len);
 }
 
 char* IRpc::GetDataBuff(size_t size)

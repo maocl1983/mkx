@@ -60,7 +60,7 @@ string IniConfig::GetStr(const string& name) const
 	return string("");
 }
 
-int IniConfig::GetInt(const string& name, int defaultVal) 
+int IniConfig::GetInt(const string& name, int defaultVal) const
 {
 	const string* pstr = getVal(name);
 	if (pstr) {

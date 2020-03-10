@@ -19,22 +19,24 @@ typedef struct block {
 	char		data[];
 } __attribute__ ((packed)) block_t;
 
-class BufferEvent;
 class LoopQueue {
 public:
 	LoopQueue();
 	~LoopQueue();
 
 	bool Init(int bufflen = 1024*1024);
-	bool Push(int fd, MsgType type, const char* msg = nullptr, int msglen = 0);
-	bool Pop(block_t** block);
 
-	char* PreAlloc(int fd, MsgType type, int msglen);
-	void FinishCopy(int copylen);
+	bool Push(int fd, MsgType type, const char* msg = nullptr, int msglen = 0);
+
+	char* BufferForPush(int fd, MsgType type, int msglen);
+	void PushFinish(int copylen);
+
+	bool FrontBlock(block_t** block);
+	void PopBlock(int len);
 
 private:
-	char*	buff_;
-	int		bufflen_;
-	int		head_;
-	int		tail_;
+	char*				buff_;
+	int					bufflen_;
+	int					head_;
+	int					tail_;
 };

@@ -1,20 +1,28 @@
 #pragma once
-#include <string>
+
 #include <map>
+#include <vector>
+#include <string>
+#include <functional>
 
 class IRpc;
 class Worker;
 class TimerMgr;
-class SvrClient;
+class SvrConnector;
 class IniConfig;
 class NetMessage;
 class LoopQueue;
-class IProcessor;
+class MutexLocker;
 class IOEventHandler;
 
-enum {
-	kIOEvent_Ev		= 1,
-	KIOEvent_Lev	= 2,
+enum EventType {
+	IOEVENT_TYPE_EV		= 1,
+	IOEVENT_TYPE_LEV	= 2,
+};
+
+enum ServerModeType {
+	SERVER_MODE_SINGLE	= 1,
+	SERVER_MODE_MULTI	= 2,
 };
 
 class Server {
@@ -22,53 +30,55 @@ public:
 	Server();
 	~Server();
 
-	void Init(int evType = kIOEvent_Ev);
+	void Init(int evType = IOEVENT_TYPE_EV);
 	void Start();
 	void Stop();
 
-	bool IsInWorkThread();
+	ServerModeType ModeType();
+	bool IsMainThread();
 
 	int LoadCfg(const std::string& filename);
 	int Bind(const std::string& url);
-	int ConnectSvr(const std::string& url);
-	void Attach(int fd, IProcessor* processor);
-
-	void AttachSvrClient(int fd, SvrClient* scli);
+	int ConnectSvr(const std::string& url, std::function<void(int)> closeCb);
 	void CloseSvr(int fd);
-	SvrClient* GetSvrClient(int fd);
-
-	int AsyncSendMsg(int fd, const char* msg, int msglen);
 
 	TimerMgr* GetTimerMgr();
 	IRpc* GetRpc();
-	LoopQueue* GetRecvQue();
-	LoopQueue* GetSendQue();
 	const IniConfig* GetCfg();
 	IOEventHandler*	GetIOEvHandler();
 
+	LoopQueue* GetRecvQue();
+	LoopQueue* GetSendQue();
+	MutexLocker* GetRecvLocker();
+	MutexLocker* GetSendLocker();
+
+	int SendMsg(int fd, const char* msg, int msglen);
 	int OnRecvMsg(int fd, const char* msg, int msglen, bool cli);
+	void OnCliConnected(int fd);
+	void OnCliClosed(int fd);
 	void OnSvrClosed(int fd);
-	void MessageRecvNoti();
-	void MessageSendNoti();
 
 private:
 	void daemonize();
 	void setSignal();
-	IProcessor* GetProcessor(int fd);
 
 private:
 	int onTimeEvent(int event);
 
 private:
-	IRpc*						rpc_;
-	Worker*						worker_;
-	IniConfig*					iniCfg_;
-	NetMessage*					netMessage_;
-	LoopQueue*					recvQue_;
-	LoopQueue*					sendQue_;
-	TimerMgr*					timerMgr_;
-	IOEventHandler*				evHandler_;
-	std::map<int, IProcessor*>	processors_;
-	std::map<int, SvrClient*>	svrClients_;
+	ServerModeType					modeType_;
+	pthread_t						mainThreadId_;
+	IRpc*							rpc_;
+	IniConfig*						iniCfg_;
+	NetMessage*						netMessage_;
+	TimerMgr*						timerMgr_;
+	IOEventHandler*					evHandler_;
+	std::vector<Worker*>			workers_;
+	std::map<int, SvrConnector*>	svrConnectors_;
+
+	LoopQueue*						recvQue_;
+	LoopQueue*						sendQue_;
+	MutexLocker*					recvLocker_;
+	MutexLocker*					sendLocker_;
 };
 

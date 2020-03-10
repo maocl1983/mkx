@@ -3,23 +3,25 @@
 #include "Thread.h"
 
 class Server;
-class IOEventHandler;
-class UserEvent;
+struct block;
 
 class Worker : public Thread {
 public:
 	Worker(Server* server);
 	~Worker();
 	
-	void Init(int evType);
-	void OnMessage();
+	void Init();
 
 public:
 	void Run() override;
-	void EvAsyncSend();
+
+private:
+	void dealRecvQue();
+	void dealMessage(struct block* msg);
 
 private:
 	Server*				server_;
-	IOEventHandler*		evHandler_;
-	UserEvent*			msgEvent_;
+	char*				recvBuffer_;
+	int					maxMsglen_;
+	int					statCnt_;
 };

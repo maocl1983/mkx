@@ -2,8 +2,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <sys/time.h>
+
 #include "Log.h"
-#include "IOEventHandler.h"
 #include "LoopQueue.h"
 
 LoopQueue::LoopQueue()
@@ -44,7 +45,7 @@ bool LoopQueue::Init(int bufflen)
 	
 bool LoopQueue::Push(int fd, MsgType type, const char* msg, int msglen)
 {
-	char* prebuff = PreAlloc(fd, type, msglen);
+	char* prebuff = BufferForPush(fd, type, msglen);
 	if (!prebuff) {
 		return false;
 	}
@@ -53,12 +54,49 @@ bool LoopQueue::Push(int fd, MsgType type, const char* msg, int msglen)
 		memcpy(prebuff, msg, msglen);
 	}
 
-	FinishCopy(msglen);
+	PushFinish(msglen);
 
 	return true;
 }
 
-bool LoopQueue::Pop(block_t** block)
+char* LoopQueue::BufferForPush(int fd, MsgType type, int msglen)
+{
+	int blocklen = sizeof(block_t);
+
+	if (tail_ >= head_ && tail_ + blocklen > bufflen_) {
+		PLOG_ERROR("queue loop to head of queue! tail=%u!", tail_);
+		tail_ = 0;
+	}
+
+	if (tail_ >= head_ && tail_ + blocklen + msglen > bufflen_) {
+		block_t* bt = (block_t*)(buff_ + tail_);
+		bt->len = blocklen;
+		bt->discard = true;
+		PLOG_ERROR("queue loop to head of queue for discard tail=%u!", tail_);
+		tail_ = 0;
+	}
+
+	if (tail_ < head_ && tail_ + blocklen + msglen >= head_) {
+		PLOG_ERROR("queue loop full! head=%u tail=%u!", head_, tail_);
+		return nullptr;
+	}
+
+	block_t* bt = (block_t*)(buff_ + tail_);
+	bt->len = blocklen + msglen;
+	bt->discard = false;
+	bt->fd = fd;
+	bt->type = type;
+	bt->datalen = msglen;
+
+	return bt->data;
+}
+
+void LoopQueue::PushFinish(int copylen)
+{
+	tail_ += sizeof(block_t) + copylen;
+}
+
+bool LoopQueue::FrontBlock(block_t** block)
 {
 	int blen = sizeof(block_t);
 
@@ -89,45 +127,12 @@ bool LoopQueue::Pop(block_t** block)
 	}
 
 	*block = bt;
-	head_ += bt->len;
 
 	return true;
 }
 
-char* LoopQueue::PreAlloc(int fd, MsgType type, int msglen)
+void LoopQueue::PopBlock(int len)
 {
-	int blocklen = sizeof(block_t);
-
-	if (tail_ >= head_ && tail_ + blocklen > bufflen_) {
-		PLOG_ERROR("queue loop to head of queue! tail=%u!", tail_);
-		tail_ = 0;
-	}
-
-	if (tail_ >= head_ && tail_ + blocklen + msglen > bufflen_) {
-		block_t* bt = (block_t*)(buff_ + tail_);
-		bt->len = blocklen;
-		bt->discard = true;
-		PLOG_ERROR("queue loop to head of queue for discard tail=%u!", tail_);
-		tail_ = 0;
-	}
-
-	if (tail_ < head_ && tail_ + blocklen + msglen > head_) {
-		PLOG_ERROR("queue loop full! head=%u tail=%u!", head_, tail_);
-		return nullptr;
-	}
-
-	block_t* bt = (block_t*)(buff_ + tail_);
-	bt->len = blocklen + msglen;
-	bt->discard = false;
-	bt->fd = fd;
-	bt->type = type;
-	bt->datalen = msglen;
-
-	return bt->data;
-}
-
-void LoopQueue::FinishCopy(int copylen)
-{
-	tail_ += sizeof(block_t) + copylen;
+	head_ += len;
 }
 

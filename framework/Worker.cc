@@ -1,81 +1,82 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <arpa/inet.h>
+#include <assert.h>
+
 #include "Log.h"
+#include "Locker.h"
+#include "IniConfig.h"
 #include "IRpc.h"
 #include "Server.h"
-#include "SvrClient.h"
 #include "LoopQueue.h"
-#include "IOEventHandler.h"
 #include "Worker.h"
-
-static void msgEventCb(EventBase* ev, int fd, int events, void* arg)
-{
-	PLOG_DEBUG("Worker msgEventCb");
-	Worker* worker = (Worker*)arg;
-	worker->OnMessage();
-}
-
 
 Worker::Worker(Server* server)
 	: server_(server)
 {
-	evHandler_ = nullptr;
-	msgEvent_ = nullptr;
+	recvBuffer_ = nullptr;
+	maxMsglen_ = 0;
+	statCnt_ = 0;
 }
 
 Worker::~Worker()
 {
-	if (msgEvent_) {
-		delete msgEvent_;
-		msgEvent_ = nullptr;
+	if (recvBuffer_) {
+		free(recvBuffer_);
+		recvBuffer_ = nullptr;
 	}
 }
 
-void Worker::Init(int evType)
+void Worker::Init()
 {
-	evHandler_ = GetIOEventHandlerFactory(evType)->GetIOEventHandler();
-
-	msgEvent_ = evHandler_->NewUserEvent();
-	msgEvent_->SetCb(msgEventCb, this);
-	msgEvent_->Start();
-}
-
-void Worker::OnMessage()
-{
-	LoopQueue* recvq = server_->GetRecvQue();
-
-	block_t* block;
-	while (recvq->Pop(&block)) {
-		if (block->type == MT_ADD_CLI_FD) {
-			PLOG_DEBUG("Worker::OnMessage cli fd connected fd=%d", block->fd);
-		} else if (block->type == MT_ADD_SVR_FD) {
-			PLOG_DEBUG("Worker::OnMessage svr fd connected fd=%d", block->fd);
-			SvrClient* scli = server_->GetSvrClient(block->fd);
-			if (scli) {
-				scli->OnConnectedInThread();
-			}
-		} else if (block->type == MT_DEL_CLI_FD) {
-			PLOG_DEBUG("Worker::OnMessage cli fd closed fd=%d", block->fd);
-		} else if (block->type == MT_DEL_SVR_FD) {
-			PLOG_DEBUG("Worker::OnMessage svr fd closed fd=%d", block->fd);
-		} else if (block->type == MT_CLI_MESSAGE){
-			PLOG_DEBUG("Worker::OnMessage cli fd=%d msglen=%u", block->fd, block->datalen);
-			server_->OnRecvMsg(block->fd, block->data, block->datalen, true);
-		} else if (block->type == MT_SVR_MESSAGE){
-			PLOG_DEBUG("Worker::OnMessage svr fd=%d msglen=%u", block->fd, block->datalen);
-			server_->OnRecvMsg(block->fd, block->data, block->datalen, false);
-		}
-	}
+	maxMsglen_ = server_->GetCfg()->GetInt("max_msglen", 81920);
+	recvBuffer_ = (char*)malloc(maxMsglen_);
 }
 
 void Worker::Run()
 {
-	evHandler_->EvRun();
+	dealRecvQue();
 }
 
-void Worker::EvAsyncSend()
+void Worker::dealRecvQue()
 {
-	msgEvent_->Trigger();
+	LoopQueue* recvq = server_->GetRecvQue();
+	MutexLocker* locker = server_->GetRecvLocker();
+
+	while (true) {
+		block_t* block = nullptr;
+		locker->Lock();
+		recvq->FrontBlock(&block);
+		if (!block && locker->WaitTimeout(10) == 0) {
+			recvq->FrontBlock(&block);
+		}
+
+		if (block) {
+			assert(block->len <= maxMsglen_);
+			memcpy(recvBuffer_, (char*)block, block->len);
+			recvq->PopBlock(block->len);
+		}
+		locker->Unlock();
+
+		if (block) {
+			dealMessage(block);
+		}
+	}
+}
+
+void Worker::dealMessage(block_t* msg)
+{
+	block_t* block = msg;
+		
+
+	if (block->type == MT_CLI_MESSAGE){
+		//PLOG_DEBUG("dealMessage cli fd=%d msglen=%u pid=%lu", block->fd, block->datalen, pthread_self());
+		server_->OnRecvMsg(block->fd, block->data, block->datalen, true);
+	} else if (block->type == MT_SVR_MESSAGE){
+		//PLOG_DEBUG("dealMessage svr fd=%d msglen=%u", block->fd, block->datalen);
+		server_->OnRecvMsg(block->fd, block->data, block->datalen, false);
+	} else {
+		PLOG_ERROR("dealMessage error! fd=%d type=%d", block->fd, block->type);
+	}
 }
 

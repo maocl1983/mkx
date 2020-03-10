@@ -6,18 +6,19 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <assert.h>
+
 #include "Log.h"
+#include "Locker.h"
+#include "IniConfig.h"
 #include "NetMessage.h"
 #include "LoopQueue.h"
 #include "IOEventHandler.h"
 #include "Server.h"
 
-const int fdmax_size = 10240;
-
-typedef enum {
-	CONN_CLI = 1,
-	CONN_SVR = 2,
-} ConnType;
+enum ConnType {
+	CONN_TYPE_CLI = 1,
+	CONN_TYPE_SVR = 2,
+};
 
 typedef struct conn_info {
 	int				fd;
@@ -28,7 +29,7 @@ typedef struct conn_info {
 static void msgEventCb(EventBase* ev, int fd, int events, void* arg)
 {
 	NetMessage* net = (NetMessage*)arg;
-	net->OnSendMsg();
+	net->OnSendMsgEvent();
 }
 
 static void eventCb(EventBase* ev, int fd, int events, void* arg)
@@ -79,14 +80,24 @@ NetMessage::NetMessage(Server* server)
 	msgEvent_->SetCb(msgEventCb, this);
 	msgEvent_->Start();
 
-	recvQue_ = server_->GetRecvQue();
-	sendQue_ = server_->GetSendQue();
 
-	maxfds_ = fdmax_size;
+	maxMsglen_ = server_->GetCfg()->GetInt("max_msglen", 81920);
+
+	maxfds_ = server_->GetCfg()->GetInt("max_fd", 10240);
 	conns_ = (conn_info_t*)malloc(sizeof(conn_info_t) * maxfds_);
 	for (int i = 0; i < maxfds_; i++) {
 		conns_[i].fd = -1;
 		conns_[i].bev = nullptr;
+	}
+
+	if (server_->ModeType() == SERVER_MODE_SINGLE) {
+		recvQue_ = nullptr;
+		sendQue_ = nullptr;
+		recvBuffer_ = (char*)malloc(maxMsglen_);
+	} else {
+		recvQue_ = server_->GetRecvQue();
+		sendQue_ = server_->GetSendQue();
+		recvBuffer_ = nullptr;
 	}
 }
 
@@ -95,6 +106,10 @@ NetMessage::~NetMessage()
 	if (msgEvent_) {
 		delete msgEvent_;
 		msgEvent_ = nullptr;
+	}
+
+	if (recvBuffer_) {
+		free(recvBuffer_);
 	}
 }
 
@@ -154,14 +169,10 @@ int NetMessage::OpenConn(int fd, BufferEvent* bev, int listenfd)
 		return -1;
 	}
 
-	ConnType ctype = CONN_SVR;
+	ConnType ctype = CONN_TYPE_SVR;
 	if (listenfd > 0) {
-		ctype = CONN_CLI;
-		if (!recvQue_->Push(fd, MT_ADD_CLI_FD)) {
-			PLOG_ERROR("new fd error while push to queue! fd=%d", fd);
-			return -1;
-		}
-		server_->MessageRecvNoti();
+		ctype = CONN_TYPE_CLI;
+		server_->OnCliConnected(fd);
 	}
 
 	conns_[fd].fd = fd;
@@ -194,12 +205,9 @@ int NetMessage::CloseConn(int fd)
 		return -1;
 	}
 
-	if (conns_[fd].ctype == CONN_CLI) {
-		if (!recvQue_->Push(fd, MT_DEL_CLI_FD)) {
-			PLOG_ERROR("close cli fd error while push to queue! fd=%d", fd);
-			return -1;
-		}
-		server_->MessageRecvNoti();
+	close(fd);
+	if (conns_[fd].ctype == CONN_TYPE_CLI) {
+		server_->OnCliClosed(fd);
 	} else {
 		server_->OnSvrClosed(fd);
 	}
@@ -212,38 +220,6 @@ int NetMessage::CloseConn(int fd)
 	conns_[fd].bev = NULL;
 
 	return 0;
-}
-
-int NetMessage::DealRecvMsg(int fd, const char* msg, int msglen)
-{
-	conn_info_t* conn = GetConn(fd);
-	if (!conn) {
-		CloseConn(fd);
-		return 0;
-	}
-
-	// TODO: check len
-	if (msglen < 4) {
-		return 0;
-	}
-
-	uint32_t reallen = ntohl(*(uint32_t*)msg);
-	PLOG_DEBUG("NetMessage::DealRecvMsg fd=%u reallen=%u", fd, reallen);
-	if (reallen > 8103808) {
-		return -1;
-	}
-	if (reallen > (uint32_t)msglen) {
-		return 0;
-	}
-
-	MsgType mtype = conns_[fd].ctype == CONN_CLI ? MT_CLI_MESSAGE : MT_SVR_MESSAGE;
-	if (!recvQue_->Push(fd, mtype, msg, reallen)) {
-		PLOG_ERROR("deal msg error while push to queue! fd=%d", fd);
-		return -1;
-	}
-
-	server_->MessageRecvNoti();
-	return reallen;
 }
 
 int NetMessage::RecvMsg(int fd)
@@ -261,43 +237,57 @@ int NetMessage::RecvMsg(int fd)
 	}
 
 	uint32_t reallen = ntohl(*(uint32_t*)lenbuff);
-	if (reallen > 8103808) {
+	if (reallen > maxMsglen_) {
+		PLOG_ERROR("recv msg len error! len=%u maxlen=%u", reallen, maxMsglen_);
 		return -1;
 	}
 	if (reallen > bev->GetReadBuffLen()) {
 		return 0;
 	}
 
-	MsgType mtype = conns_[fd].ctype == CONN_CLI ? MT_CLI_MESSAGE : MT_SVR_MESSAGE;
-	char* buffer = recvQue_->PreAlloc(fd, mtype, reallen);
-	if (!buffer) {
-		PLOG_ERROR("deal msg error while push to queue! fd=%d", fd);
-		return -1;
+	MsgType mtype = MT_CLI_MESSAGE;
+	if (conns_[fd].ctype == CONN_TYPE_SVR) {
+		mtype = MT_SVR_MESSAGE;
 	}
-	bev->Read(buffer, reallen);
-	recvQue_->FinishCopy(reallen);
 
-	server_->MessageRecvNoti();
+	if (server_->ModeType() == SERVER_MODE_SINGLE) {
+		bev->Read(recvBuffer_, reallen);
+		server_->OnRecvMsg(fd, recvBuffer_, reallen, mtype == MT_CLI_MESSAGE);
+	} else {
+		char* buffer = recvQue_->BufferForPush(fd, mtype, reallen);
+		if (!buffer) {
+			PLOG_ERROR("deal msg error while push to queue! fd=%d", fd);
+			return -1;
+		}
+		bev->Read(buffer, reallen);
+		recvQue_->PushFinish(reallen);
+
+		MutexLocker* locker = server_->GetRecvLocker();
+		locker->Lock();
+		locker->Signal();
+		locker->Unlock();
+	}
 	return reallen;
 }
 
-void NetMessage::EvAsyncSend()
+void NetMessage::SendQueNoti()
 {
-	PLOG_DEBUG("NetMessage::EvAsyncSend");
+	//PLOG_DEBUG("NetMessage::EvAsyncSend");
 	if (msgEvent_) {
 		msgEvent_->Trigger();
 	}
 }
 
-void NetMessage::OnSendMsg()
+void NetMessage::OnSendMsgEvent()
 {
 	LoopQueue* sendq = server_->GetSendQue();
 
 	block_t* block;
-	while (sendq->Pop(&block)) {
+	while (sendq->FrontBlock(&block)) {
 		if (block->type == MT_SVR_MESSAGE) {
 			SendMsg(block->fd, block->data, block->datalen);
 		}
+		sendq->PopBlock(block->len);
 	}
 }
 

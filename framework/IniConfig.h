@@ -9,7 +9,7 @@ public:
 
 	int Parse(const std::string& filename);
 	std::string GetStr(const std::string& name) const;
-	int GetInt(const std::string& name, int defaultVal = 0);
+	int GetInt(const std::string& name, int defaultVal = 0) const;
 
 private:
 	void strTrim(std::string& str);

@@ -3,14 +3,14 @@
 #include <signal.h>
 
 #include "Log.h"
+#include "Locker.h"
 #include "Timer.h"
 #include "IRpc.h"
-#include "SvrClient.h"
+#include "SvrConnector.h"
 #include "Worker.h"
 #include "IniConfig.h"
 #include "NetMessage.h"
 #include "LoopQueue.h"
-#include "IProcessor.h"
 #include "IOEventHandler.h"
 #include "Server.h"
 
@@ -25,12 +25,17 @@ static void sigclose(EventBase* ev, int fd, int events, void* arg)
 
 Server::Server()
 {
+	modeType_ = SERVER_MODE_SINGLE;
+	mainThreadId_ = pthread_self();
+
 	evHandler_ = nullptr;
-	worker_ = nullptr;
-	sendQue_ = nullptr;
-	recvQue_ = nullptr;
 	netMessage_ = nullptr;
 	iniCfg_ = nullptr;
+	
+	sendQue_ = nullptr;
+	recvQue_ = nullptr;
+	recvLocker_ = nullptr;
+	sendLocker_ = nullptr;
 }
 
 Server::~Server()
@@ -39,6 +44,11 @@ Server::~Server()
 		delete iniCfg_;
 		iniCfg_ = nullptr;
 	}
+
+	for (auto w : workers_) {
+		delete w;
+	}
+	workers_.clear();
 }
 
 void Server::Init(int evType)
@@ -56,17 +66,26 @@ void Server::Init(int evType)
 	Log::Instance().SetLogSize(iniCfg_->GetInt("log_size", 0) * 1024 * 1024);
 	Log::Instance().SetLogPriority((LogPriority)iniCfg_->GetInt("log_level", 2));
 
-	recvQue_ = new LoopQueue();
-	sendQue_ = new LoopQueue();
-	recvQue_->Init();
-	sendQue_->Init();
+	int workCnt = iniCfg_->GetInt("work_num", 0);
+	if (workCnt > 0) {
+		modeType_ = SERVER_MODE_MULTI;
+		recvQue_ = new LoopQueue();
+		sendQue_ = new LoopQueue();
+		recvQue_->Init();
+		sendQue_->Init();
+		recvLocker_ = new MutexLocker();
+		sendLocker_ = new MutexLocker();
+	}
 
 	timerMgr_ = new TimerMgr(evHandler_);
 	rpc_ = new IRpc(this);
 
-	worker_ = new Worker(this);
-	worker_->Init(evType);
-	worker_->Start();
+	for (int i = 0; i < workCnt; i++) {
+		Worker* worker = new Worker(this);
+		worker->Init();
+		worker->Start();
+		workers_.push_back(worker);
+	}
 
 	netMessage_ = new NetMessage(this);
 
@@ -83,9 +102,14 @@ void Server::Stop()
 	evHandler_->EvStop();
 }
 
-bool Server::IsInWorkThread()
+ServerModeType Server::ModeType()
 {
-	return pthread_self() == worker_->ThreadID();
+	return modeType_;
+}
+
+bool Server::IsMainThread()
+{
+	return pthread_self() == mainThreadId_;
 }
 
 int Server::LoadCfg(const std::string& filename)
@@ -110,7 +134,7 @@ int Server::Bind(const string& url)
 	return netMessage_->Listen(ipStr.c_str(), atoi(portStr.c_str()));
 }
 
-int Server::ConnectSvr(const std::string& url)
+int Server::ConnectSvr(const std::string& url, std::function<void(int)> closeCb)
 {
 	string::size_type n = url.find(":");
 	if (n == string::npos) {
@@ -120,42 +144,39 @@ int Server::ConnectSvr(const std::string& url)
 	string ipStr = url.substr(0, n);
 	string portStr = url.substr(n+1);
 
-	return netMessage_->Connect(ipStr.c_str(), atoi(portStr.c_str()));
+	int fd = netMessage_->Connect(ipStr.c_str(), atoi(portStr.c_str()));
+	if (fd > 0) {
+		SvrConnector* connector = new SvrConnector(fd, this);
+		connector->SetClosedCb(closeCb);
+		svrConnectors_.emplace(fd, connector);
+	}
+
+	return fd;
 }
 
 void Server::CloseSvr(int fd)
 {
-	svrClients_.erase(fd);
 	netMessage_->CloseConn(fd);
 }
 
-SvrClient* Server::GetSvrClient(int fd)
+int Server::SendMsg(int fd, const char* msg, int msglen)
 {
-	std::map<int, SvrClient*>::iterator it = svrClients_.find(fd);
-	if (it == svrClients_.end()) {
-		return nullptr;
+	if (modeType_ == SERVER_MODE_SINGLE) {
+		return netMessage_->SendMsg(fd, msg, msglen);
 	}
 
-	return it->second;
-}
+	if (IsMainThread()) {
+		return netMessage_->SendMsg(fd, msg, msglen);
+	}
 
-void Server::Attach(int fd, IProcessor* processor)
-{
-	processors_[fd] = processor;
-	processor->SetHandler(this);
-}
+	sendLocker_->Lock();
+	bool ret = sendQue_->Push(fd, MT_SVR_MESSAGE, msg, msglen);
+	sendLocker_->Unlock();
+	if (ret) {
+		netMessage_->SendQueNoti();
+	}
 
-void Server::AttachSvrClient(int fd, SvrClient* scli)
-{
-	svrClients_[fd] = scli;
-}
-
-int Server::AsyncSendMsg(int fd, const char* msg, int msglen)
-{
-	LoopQueue* sendq = GetSendQue();
-	sendq->Push(fd, MT_SVR_MESSAGE, msg, msglen);
-	MessageSendNoti();
-	return 0;
+	return ret ? 0 : -1;
 }
 
 IOEventHandler* Server::GetIOEvHandler()
@@ -171,6 +192,16 @@ LoopQueue* Server::GetRecvQue()
 LoopQueue* Server::GetSendQue()
 {
 	return sendQue_;
+}
+
+MutexLocker* Server::GetRecvLocker()
+{
+	return recvLocker_;
+}
+
+MutexLocker* Server::GetSendLocker()
+{
+	return sendLocker_;
 }
 
 IRpc* Server::GetRpc()
@@ -193,34 +224,26 @@ int Server::OnRecvMsg(int fd, const char* msg, int msglen, bool cli)
 	if (cli) {
 		return rpc_->OnRecvCliMsg(fd, msg, msglen);
 	}
-		
-	std::map<int, SvrClient*>::iterator it = svrClients_.find(fd);
-	if (it == svrClients_.end()) {
-		return -1;
-	}
-	return it->second->OnRecvMsg(msg, msglen);
+
+	return rpc_->OnRecvSvrMsg(fd, msg, msglen);
+}
+
+void Server::OnCliConnected(int fd)
+{
+	PLOG_DEBUG("OnCliConnected fd=%d", fd);
+}
+
+void Server::OnCliClosed(int fd)
+{
+	PLOG_DEBUG("OnCliClosed fd=%d", fd);
 }
 
 void Server::OnSvrClosed(int fd)
 {
-	std::map<int, SvrClient*>::iterator it = svrClients_.find(fd);
-	if (it != svrClients_.end()) {
-		it->second->OnClosed();
-		svrClients_.erase(fd);
-	}
-}
-
-void Server::MessageRecvNoti()
-{
-	if (worker_) {
-		worker_->EvAsyncSend();
-	}
-}
-
-void Server::MessageSendNoti()
-{
-	if (netMessage_) {
-		netMessage_->EvAsyncSend();
+	std::map<int, SvrConnector*>::iterator it = svrConnectors_.find(fd);
+	if (it != svrConnectors_.end()) {
+		delete it->second;
+		svrConnectors_.erase(it);
 	}
 }
 
@@ -246,15 +269,6 @@ void Server::setSignal()
 	SignalEvent* evsignal = evHandler_->NewSignalEvent(signal);
 	evsignal->SetCb(sigclose, this);
 	evsignal->Start();
-}
-
-IProcessor* Server::GetProcessor(int fd)
-{
-	std::map<int, IProcessor*>::iterator it = processors_.find(fd);
-	if (it != processors_.end()) {
-		return it->second;
-	}
-	return nullptr;
 }
 
 int Server::onTimeEvent(int event)

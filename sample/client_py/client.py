@@ -56,7 +56,7 @@ class Socket:
         try:
             hstr = self.s.recv(12)
             (datalen, ret, namelen) = struct.unpack(">III", hstr)
-            print (datalen, ret, namelen)
+            #print (datalen, ret, namelen)
             if namelen > 0:
                 namestr = self.s.recv(namelen)
             if datalen > 12 + namelen:

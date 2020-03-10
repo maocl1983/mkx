@@ -6,7 +6,7 @@ import game_pb2
 
 sock = client.Socket("172.27.0.7", 8812)
 sock.connect()
-for i in range(20):
+for i in range(1000):
     request = game_pb2.LoginRequest()
     request.player_id = 110022 + i
     msgstr = request.SerializeToString()
