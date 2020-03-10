@@ -6,8 +6,8 @@
 
 #define INSTALL_IOEVENTEV \
 	do { \
-		if (!GetIOEventHandlerFactory(kIOEvent_Ev)) { \
-			SetIOEventHandlerFactory(kIOEvent_Ev, new IOEventEvHandlerFactory()); \
+		if (!GetIOEventHandlerFactory(IOEVENT_TYPE_EV)) { \
+			SetIOEventHandlerFactory(IOEVENT_TYPE_EV, new IOEventEvHandlerFactory()); \
 		} \
 	} while(0)
 
