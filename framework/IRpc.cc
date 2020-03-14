@@ -87,7 +87,7 @@ IRpc::~IRpc()
 	}
 }
 
-int IRpc::SendRespond(int fd, int ret, const std::string& name, int datalen)
+int IRpc::SendRespond(int fd, uint64_t remote, int ret, const std::string& name, int datalen)
 {
 	rhead_->Ret = ret;
 	rhead_->Name = name;
@@ -98,7 +98,7 @@ int IRpc::SendRespond(int fd, int ret, const std::string& name, int datalen)
 	}
 	
 	PLOG_DEBUG("IRpc::SendRespond len=%d", rhead_->Len);
-	return server_->SendMsg(fd, databuff_ + sidx, rhead_->Len);
+	return server_->SendMsg(fd, remote, databuff_ + sidx, rhead_->Len);
 }
 
 int IRpc::SendRequest(int fd, const std::string& name, int datalen)
@@ -111,7 +111,7 @@ int IRpc::SendRequest(int fd, const std::string& name, int datalen)
 		return -1;
 	}
 	
-	return server_->SendMsg(fd, databuff_ + sidx, rhead_->Len);
+	return server_->SendMsg(fd, 0, databuff_ + sidx, rhead_->Len);
 }
 
 char* IRpc::GetDataBuff(size_t size)
@@ -185,7 +185,7 @@ int IRpc::SetRequestFunction(const OnRequest& func)
 	return 0;
 }
 
-int IRpc::OnRecvCliMsg(int fd, const char* msg, int msglen)
+int IRpc::OnRecvCliMsg(int fd, uint64_t remote, const char* msg, int msglen)
 {
 	if (!msg) {
 		PLOG_ERROR("IRpc OnRecvMsg msg nullptr!");
@@ -204,12 +204,13 @@ int IRpc::OnRecvCliMsg(int fd, const char* msg, int msglen)
 			return baseRequest_(fd, rhead_->Name, rhead_->Data, rhead_->DataLen);
 		}
 		PLOG_ERROR("IRpc OnRecvMsg cannot find request! Name=%s", rhead_->Name.c_str());
-		SendRespond(fd, 1, rhead_->Name, 0);
+		int errcode = 101;
+		SendRespond(fd, remote, errcode, rhead_->Name, 0);
 		return -1;
 	}
 
 	//PLOG_DEBUG("IRpc::OnRecvMsg fd=%d len=%u", fd, msglen);
-	return (it->second)(fd, rhead_->Data, rhead_->DataLen);
+	return (it->second)(fd, remote, rhead_->Data, rhead_->DataLen);
 }
 
 int IRpc::OnRecvSvrMsg(int fd, const char* msg, int msglen)

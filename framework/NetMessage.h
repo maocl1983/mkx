@@ -16,19 +16,23 @@ public:
 
 	IOEventHandler* GetIOEventHandler();	
 
-	int Listen(const char* ip, int port);
-	int Connect(const char* ip, int port);
-	int SendMsg(int fd, const char* msg, int msglen);
+	int Bind(int protocol, const char* ip, int port);
+	int Connect(int protocol, const char* ip, int port);
+	int SendMsg(int fd, uint64_t remote, const char* msg, int msglen);
 
 public:
-	int OpenConn(int fd, BufferEvent* bev, int listenfd = -1);
+	int OpenConn(int fd, BufferEvent* bev, int protocol, int listenfd = -1);
 	struct conn_info* GetConn(int fd);
 	int CloseConn(int fd);
-	int RecvMsg(int fd);
+	int RecvMsg(int fd, uint64_t remote);
 
 	int OnConnClosed(int fd);
 	void OnSendMsgEvent();
 	void SendQueNoti();
+
+private:
+	int recvTcpMsg(struct conn_info* conn);
+	int recvUdpMsg(struct conn_info* conn, uint64_t remote);
 
 private:
 	Server*				server_;

@@ -53,7 +53,7 @@ private:
 class BlockBuffer;
 class BufferEventEv : public BufferEvent {
 public:
-	BufferEventEv(IOEventHandler* ev, int fd);
+	BufferEventEv(IOEventHandler* ev, int protocol, int fd);
 	~BufferEventEv();
 	
 	virtual void Enable(int flag) override;
@@ -63,11 +63,17 @@ public:
 	virtual size_t GetReadBuffLen() override;
 
 	virtual size_t Read(void* data, size_t size) override;
-	virtual int Write(const void* data, size_t size) override;
+	virtual int Write(uint64_t remote, const void* data, size_t size) override;
 
 public:
 	int RecvData();
-	int SendData();
+	int FlushSendBuffer();
+
+private:
+	int recvTcpData();
+	int recvUdpData();
+	int sendTcpData(const void* data, size_t size);
+	int sendUdpData(uint64_t remote, const void* data, size_t size);
 
 private:
 	ev_io*					evrd_;
@@ -79,7 +85,7 @@ private:
 // ListenEventEv
 class ListenEventEv : public ListenEvent {
 public:
-	ListenEventEv(IOEventHandler* ev, int lfd);
+	ListenEventEv(IOEventHandler* ev, int protocol, int lfd);
 	~ListenEventEv();
 
 	virtual void Start() override;
@@ -102,17 +108,18 @@ public:
 	virtual void EvRun() override;
 	virtual void EvStop() override;
 
-	virtual int EvListenIP(const char* ip, int port, const OnEventCb& lcb, void* udata) override;
-	virtual BufferEvent* ConnectIP(const char* ip, int port) override;
+	virtual int Bind(int protocol, const char* ip, int port) override;
+	virtual BufferEvent* Connect(int protocol, const char* ip, int port) override;
 
-	virtual BufferEvent* NewBufferEvent(int fd) override;
+	virtual ListenEvent* NewListenEvent(int protocol, int fd) override;
+	virtual BufferEvent* NewBufferEvent(int protocol, int fd) override;
 	virtual TimerEvent* NewTimerEvent() override;
 	virtual SignalEvent* NewSignalEvent(int signal) override;
 	virtual UserEvent* NewUserEvent() override;
 
 private:
-	BufferEvent* doConnect(const struct sockaddr* sa, int socklen);
-	int doListen(const struct sockaddr* sa, int socklen, const OnEventCb& lcb, void* udata);
+	BufferEvent* doConnect(int protocol, const struct sockaddr* sa, int socklen);
+	int doBind(int protocol, const struct sockaddr* sa, int socklen);
 
 private:
 	struct ev_loop*			evloop_;

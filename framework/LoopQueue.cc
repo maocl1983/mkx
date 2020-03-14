@@ -43,9 +43,9 @@ bool LoopQueue::Init(int bufflen)
 	return true;
 }
 	
-bool LoopQueue::Push(int fd, MsgType type, const char* msg, int msglen)
+bool LoopQueue::Push(int fd, uint64_t remote, int type, const char* msg, int msglen)
 {
-	char* prebuff = BufferForPush(fd, type, msglen);
+	char* prebuff = BufferForPush(fd, remote, type, msglen);
 	if (!prebuff) {
 		return false;
 	}
@@ -59,7 +59,7 @@ bool LoopQueue::Push(int fd, MsgType type, const char* msg, int msglen)
 	return true;
 }
 
-char* LoopQueue::BufferForPush(int fd, MsgType type, int msglen)
+char* LoopQueue::BufferForPush(int fd, uint64_t remote, int type, int msglen)
 {
 	int blocklen = sizeof(block_t);
 
@@ -86,6 +86,7 @@ char* LoopQueue::BufferForPush(int fd, MsgType type, int msglen)
 	bt->discard = false;
 	bt->fd = fd;
 	bt->type = type;
+	bt->remote = remote;
 	bt->datalen = msglen;
 
 	return bt->data;

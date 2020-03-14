@@ -3,7 +3,7 @@
 
 using namespace std;
 
-static void TimeoutCallback(EventBase* ev, int fd, int events, void* arg)
+static void TimeoutCallback(EventBase* ev, int events, void* arg)
 {
 	TimerObj* tobj = reinterpret_cast<TimerObj*>(arg);
 	tobj->Callback();

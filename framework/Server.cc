@@ -17,7 +17,7 @@
 using namespace std;
 using namespace std::placeholders;
 
-static void sigclose(EventBase* ev, int fd, int events, void* arg)
+static void sigclose(EventBase* ev, int events, void* arg)
 {
 	Server* svr = (Server*)arg;
 	svr->Stop();
@@ -123,30 +123,54 @@ int Server::LoadCfg(const std::string& filename)
 
 int Server::Bind(const string& url)
 {
-	string::size_type n = url.find(":");
-	if (n == string::npos) {
+	string::size_type n1 = url.find("://");
+	if (n1 == string::npos) {
 		return -1;
 	}
-	
-	string ipStr = url.substr(0, n);
-	string portStr = url.substr(n+1);
+	string protocolStr = url.substr(0, n1);
 
-	return netMessage_->Listen(ipStr.c_str(), atoi(portStr.c_str()));
+	string::size_type ns = n1 + 3;
+	string::size_type n2 = url.find(":", ns);
+	if (n2 == string::npos) {
+		return -1;
+	}
+	string ipStr = url.substr(ns, n2 - ns);
+	string portStr = url.substr(n2 + 1);
+
+	int protocol = IOEV_TCP_PROTOCOL;
+	if (protocolStr.compare("udp") == 0) {
+		protocol = IOEV_UDP_PROTOCOL;
+	}
+	return netMessage_->Bind(protocol, ipStr.c_str(), atoi(portStr.c_str()));
 }
 
 int Server::ConnectSvr(const std::string& url, std::function<void(int)> closeCb)
 {
-	string::size_type n = url.find(":");
-	if (n == string::npos) {
+	string::size_type n1 = url.find("://");
+	if (n1 == string::npos) {
 		return -1;
 	}
-	
-	string ipStr = url.substr(0, n);
-	string portStr = url.substr(n+1);
+	string protocolStr = url.substr(0, n1);
 
-	int fd = netMessage_->Connect(ipStr.c_str(), atoi(portStr.c_str()));
+	string::size_type ns = n1 + 3;
+	string::size_type n2 = url.find(":", ns);
+	if (n2 == string::npos) {
+		return -1;
+	}
+	string ipStr = url.substr(ns, n2 - ns);
+	string portStr = url.substr(n2 + 1);
+
+	int protocol = IOEV_TCP_PROTOCOL;
+	if (protocolStr.compare("udp") == 0) {
+		protocol = IOEV_UDP_PROTOCOL;
+	}
+
+	const char* ip = ipStr.c_str();
+	int port = atoi(portStr.c_str());
+	int fd = netMessage_->Connect(protocol, ip, port);
 	if (fd > 0) {
-		SvrConnector* connector = new SvrConnector(fd, this);
+		SvrConnector* connector = new SvrConnector(protocol, ip, port, this);
+		connector->SetFd(fd);
 		connector->SetClosedCb(closeCb);
 		svrConnectors_.emplace(fd, connector);
 	}
@@ -159,18 +183,29 @@ void Server::CloseSvr(int fd)
 	netMessage_->CloseConn(fd);
 }
 
-int Server::SendMsg(int fd, const char* msg, int msglen)
+int Server::SendMsgToSvr(int fd, const char* msg, int msglen) 
 {
-	if (modeType_ == SERVER_MODE_SINGLE) {
-		return netMessage_->SendMsg(fd, msg, msglen);
+	std::map<int, SvrConnector*>::iterator it = svrConnectors_.find(fd);
+	if (it == svrConnectors_.end()) {
+		return -1;
 	}
 
-	if (IsMainThread()) {
-		return netMessage_->SendMsg(fd, msg, msglen);
+	uint64_t remote = 0;
+	if (it->second->GetProtocol() == IOEV_UDP_PROTOCOL) {
+		remote = it->second->GetRemote();
+	}
+
+	return SendMsg(fd, remote, msg, msglen);
+}
+
+int Server::SendMsg(int fd, uint64_t remote, const char* msg, int msglen)
+{
+	if (modeType_ == SERVER_MODE_SINGLE || IsMainThread()) {
+		return netMessage_->SendMsg(fd, remote, msg, msglen);
 	}
 
 	sendLocker_->Lock();
-	bool ret = sendQue_->Push(fd, MT_SVR_MESSAGE, msg, msglen);
+	bool ret = sendQue_->Push(fd, remote, MT_SVR_MESSAGE, msg, msglen);
 	sendLocker_->Unlock();
 	if (ret) {
 		netMessage_->SendQueNoti();
@@ -219,13 +254,18 @@ const IniConfig* Server::GetCfg()
 	return iniCfg_;
 }
 
-int Server::OnRecvMsg(int fd, const char* msg, int msglen, bool cli)
+int Server::OnRecvMsg(int fd, uint64_t remote, const char* msg, int msglen, bool cli)
 {
 	if (cli) {
-		return rpc_->OnRecvCliMsg(fd, msg, msglen);
+		return rpc_->OnRecvCliMsg(fd, remote, msg, msglen);
 	}
 
-	return rpc_->OnRecvSvrMsg(fd, msg, msglen);
+	std::map<int, SvrConnector*>::iterator it = svrConnectors_.find(fd);
+	if (it != svrConnectors_.end()) {
+		return it->second->OnRecvMsg(msg, msglen);
+	}
+
+	return -1;
 }
 
 void Server::OnCliConnected(int fd)
@@ -245,6 +285,15 @@ void Server::OnSvrClosed(int fd)
 		delete it->second;
 		svrConnectors_.erase(it);
 	}
+}
+
+SvrConnector* Server::GetSvrConnector(int fd)
+{
+	std::map<int, SvrConnector*>::iterator it = svrConnectors_.find(fd);
+	if (it != svrConnectors_.end()) {
+		return it->second;
+	}
+	return nullptr;
 }
 
 void Server::daemonize()

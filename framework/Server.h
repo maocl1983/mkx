@@ -52,13 +52,16 @@ public:
 	MutexLocker* GetRecvLocker();
 	MutexLocker* GetSendLocker();
 
-	int SendMsg(int fd, const char* msg, int msglen);
-	int OnRecvMsg(int fd, const char* msg, int msglen, bool cli);
+	int SendMsgToSvr(int fd, const char* msg, int msglen);
+	int SendMsg(int fd, uint64_t remote, const char* msg, int msglen);
+	int OnRecvMsg(int fd, uint64_t remote, const char* msg, int msglen, bool cli);
 	void OnCliConnected(int fd);
 	void OnCliClosed(int fd);
 	void OnSvrClosed(int fd);
 
 private:
+	SvrConnector* GetSvrConnector(int fd);
+
 	void daemonize();
 	void setSignal();
 

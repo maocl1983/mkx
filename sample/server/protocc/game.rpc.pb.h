@@ -45,11 +45,11 @@ private:
 
 class GameServiceServerInterface {
 public:
-	typedef std::function<void(int, int, const gs::LoginResponse&)> RspCb;
+	typedef std::function<void(int, uint64_t, int, const gs::LoginResponse&)> RspCb;
 public:
 	virtual ~GameServiceServerInterface() {}
 
-	virtual void login(int fd, const gs::LoginRequest& req, const RspCb& cb) = 0;
+	virtual void login(int fd, uint64_t remote, const gs::LoginRequest& req, const RspCb& cb) = 0;
 
 	typedef GameServiceServerInterface __InterfaceType;
 };
@@ -59,8 +59,8 @@ public:
 	__GameServiceSkeleton(IRpc* rpc, GameServiceServerInterface* iface);
 	virtual ~__GameServiceSkeleton();
 
-	int process_login(int fd, const char* buff, uint32_t bufflen);
-	void return_login(int fd, int ret, const gs::LoginResponse& rsp);
+	int process_login(int fd, uint64_t remote, const char* buff, uint32_t bufflen);
+	void return_login(int fd, uint64_t remote, int ret, const gs::LoginResponse& rsp);
 
 	virtual int RegisterServiceFunction() override;
 	virtual std::string Name() override;

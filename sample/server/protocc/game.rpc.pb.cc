@@ -90,27 +90,27 @@ __GameServiceSkeleton::~__GameServiceSkeleton()
 
 }
 
-int __GameServiceSkeleton::process_login(int fd, const char* buff, uint32_t bufflen)
+int __GameServiceSkeleton::process_login(int fd, uint64_t remote, const char* buff, uint32_t bufflen)
 {
 	gs::LoginRequest __req;
 	if (!__req.ParseFromArray((const void*)buff, bufflen)) {
 		PLOG_ERROR("process_login ParseFromArray error! len=%u", bufflen);
-		handler_->SendRespond(fd, 1, Name(), 0);
+		handler_->SendRespond(fd, remote, 1, Name(), 0);
 		return -1;
 	}
 	PLOG_DEBUG("process_login fd=%d len=%u plid=%u", fd, bufflen, __req.player_id());
 
 	GameServiceServerInterface::RspCb __rspcb = 
-		std::bind(&__GameServiceSkeleton::return_login, this, _1, _2, _3);
-	iface_->login(fd, __req, __rspcb);
+		std::bind(&__GameServiceSkeleton::return_login, this, _1, _2, _3, _4);
+	iface_->login(fd, remote, __req, __rspcb);
 	return 0;
 }
 	
-void __GameServiceSkeleton::return_login(int fd, int ret, const gs::LoginResponse& rsp)
+void __GameServiceSkeleton::return_login(int fd, uint64_t remote, int ret, const gs::LoginResponse& rsp)
 {
 	PLOG_DEBUG("return_login fd=%d ret=%u", fd, ret);
 	if (ret > 0) {
-		handler_->SendRespond(fd, ret, Name(), 0);
+		handler_->SendRespond(fd, remote, ret, Name(), 0);
 		return;
 	}
 
@@ -118,17 +118,17 @@ void __GameServiceSkeleton::return_login(int fd, int ret, const gs::LoginRespons
 	char* __buff = handler_->GetDataBuff(__size);
 	if (!__buff) {
 		PLOG_ERROR("return_login GetDataBuff error! len=%u", __size);
-		handler_->SendRespond(fd, 1, Name(), 0);
+		handler_->SendRespond(fd, remote, 1, Name(), 0);
 		return;
 	}
 
 	if (!rsp.SerializeToArray(__buff, __size)) {
 		PLOG_ERROR("return_login SerializeToArray error! len=%u", __size);
-		handler_->SendRespond(fd, 2, Name(), 0);
+		handler_->SendRespond(fd, remote, 2, Name(), 0);
 		return;
 	}
 
-	handler_->SendRespond(fd, 0, Name(), __size);
+	handler_->SendRespond(fd, remote, 0, Name(), __size);
 }
 
 int __GameServiceSkeleton::RegisterServiceFunction()
@@ -137,7 +137,7 @@ int __GameServiceSkeleton::RegisterServiceFunction()
 		return -1;
 	}
 
-	IRpc::OnRpcRequest func = std::bind(&__GameServiceSkeleton::process_login, this, _1, _2, _3);
+	IRpc::OnRpcRequest func = std::bind(&__GameServiceSkeleton::process_login, this, _1, _2, _3, _4);
 	int ret = handler_->AddRequestFunction("GameService::login", func);
 	if (ret != 0) {
 		return ret;

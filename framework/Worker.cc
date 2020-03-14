@@ -71,10 +71,10 @@ void Worker::dealMessage(block_t* msg)
 
 	if (block->type == MT_CLI_MESSAGE){
 		//PLOG_DEBUG("dealMessage cli fd=%d msglen=%u pid=%lu", block->fd, block->datalen, pthread_self());
-		server_->OnRecvMsg(block->fd, block->data, block->datalen, true);
+		server_->OnRecvMsg(block->fd, block->remote, block->data, block->datalen, true);
 	} else if (block->type == MT_SVR_MESSAGE){
 		//PLOG_DEBUG("dealMessage svr fd=%d msglen=%u", block->fd, block->datalen);
-		server_->OnRecvMsg(block->fd, block->data, block->datalen, false);
+		server_->OnRecvMsg(block->fd, 0, block->data, block->datalen, false);
 	} else {
 		PLOG_ERROR("dealMessage error! fd=%d type=%d", block->fd, block->type);
 	}

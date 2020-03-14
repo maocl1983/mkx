@@ -1,13 +1,18 @@
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include "IRpc.h"
 #include "Server.h"
 #include "SvrConnector.h"
 
 using namespace std;
 
-SvrConnector::SvrConnector(int fd, Server* server)
-	: fd_(fd), server_(server)
+SvrConnector::SvrConnector(int protocol, const char* ip, int port, Server* server)
+	: fd_(-1), protocol_(protocol), ip_(ip), port_(port), server_(server)
 {
-
+	uint32_t ipInt = 0;
+	inet_pton(AF_INET, ip_.c_str(), &ipInt);
+	remoteAddr_ = (uint64_t)ipInt << 32;
+	remoteAddr_ |= htons(port_);
 }
 
 SvrConnector::~SvrConnector()

@@ -55,7 +55,7 @@ static void
 writeCb(EV_P_ ev_io* w, int revents)
 {
 	BufferEventEv* bev = (BufferEventEv*)(w->data);
-	bev->SendData();
+	bev->FlushSendBuffer();
 }
 
 static void 
@@ -110,7 +110,7 @@ void UserEventEv::Trigger()
 void UserEventEv::DoCallback(int shorts)
 {
 	if (usercb_) {
-		usercb_(this, -1, shorts, udata_);
+		usercb_(this, shorts, udata_);
 	}
 }
 
@@ -141,7 +141,7 @@ void SignalEventEv::Start()
 void SignalEventEv::DoCallback()
 {
 	if (signalcb_) {
-		signalcb_(this, -1, signal_, udata_);
+		signalcb_(this, signal_, udata_);
 	}
 }
 
@@ -178,13 +178,13 @@ void TimerEventEv::Start(double after, double repeat)
 void TimerEventEv::DoCallback()
 {
 	if (timercb_) {
-		timercb_(this, -1, 0, udata_);
+		timercb_(this, 0, udata_);
 	}
 }
 
 ////////////////////////////////////////////////////////////
-BufferEventEv::BufferEventEv(IOEventHandler* ev, int fd)
-	: BufferEvent(ev, fd)
+BufferEventEv::BufferEventEv(IOEventHandler* ev, int protocol, int fd)
+	: BufferEvent(ev, protocol, fd)
 {
 	evrd_ = nullptr;
 	evwr_ = nullptr;
@@ -259,15 +259,30 @@ size_t BufferEventEv::Read(void* data, size_t size)
 	return recvBuffer_->Move(data, size);
 }
 
-int BufferEventEv::Write(const void* data, size_t size)
+int BufferEventEv::Write(uint64_t remote, const void* data, size_t size)
 {
 	assert(size > 0);
-	sendBuffer_->Insert(data, size);
-	ev_io_start(((IOEventEvHandler*)handler_)->GetEvLoop(), evwr_);
+
+	if (protocol_ == IOEV_TCP_PROTOCOL) {
+		sendTcpData(data, size);
+	} else {
+		sendUdpData(remote, data, size);
+	}
 	return 0;
 }
 
 int BufferEventEv::RecvData()
+{
+	if (protocol_ == IOEV_TCP_PROTOCOL) {
+		return recvTcpData();
+	} else {
+		return recvUdpData();
+	}
+
+	return 0;
+}
+
+int BufferEventEv::recvTcpData()
 {
 	while (true) {
 		int slen = 0;
@@ -290,21 +305,58 @@ int BufferEventEv::RecvData()
 	}
 
 	if (rdcb_) {
-		rdcb_(this, fd_, 0, udata_);
+		rdcb_(this, fd_, 0, 0, udata_);
 	}
 	return 0;
 
 recv_failed:
 	if (evcb_) {
-		evcb_(this, fd_, IOEV_EVENT_EOF, udata_);
+		evcb_(this, fd_, IOEV_EVENT_EOF, 0, udata_);
 	}
 	return -1;
 }
 
-int BufferEventEv::SendData()
+int BufferEventEv::recvUdpData()
 {
-	size_t totalbytes = 0;
+	while (true) {
+		int slen = 0;
+		if (ioctl(fd_, FIONREAD, &slen) < 0) {
+			goto recv_failed;
+		}
 
+		struct sockaddr_in remote;
+		socklen_t rmtlen = sizeof(remote);
+		uint64_t rmtaddr = 0;
+		char* buffer = recvBuffer_->GetBufferToWrite(slen);
+		int rlen = recvfrom(fd_, buffer, slen, 0, (struct sockaddr*)(&remote), &rmtlen);
+		if (rlen < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+		}
+
+		rmtaddr = (uint64_t)remote.sin_addr.s_addr << 32;
+		rmtaddr |= remote.sin_port;
+		recvBuffer_->FinishBufferWrite(rlen);
+
+		if (rdcb_) {
+			rdcb_(this, fd_, 0, rmtaddr, udata_);
+		}
+
+		break;
+	}
+
+	return 0;
+
+recv_failed:
+	if (evcb_) {
+		evcb_(this, fd_, IOEV_EVENT_EOF, 0, udata_);
+	}
+	return -1;
+}
+
+int BufferEventEv::FlushSendBuffer()
+{
 	while (sendBuffer_->GetTotalLen() > 0) {
 		int bufferlen = 0, sendbytes = 0;
 		char* buffer = sendBuffer_->GetBufferToRead(&bufferlen);
@@ -315,34 +367,92 @@ int BufferEventEv::SendData()
 				if (errno == EINTR) {
 					len = 0;
 				} else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-					goto send_end;
+					break;
 				} else {
 					if (evcb_) {
-						evcb_(this, fd_, IOEV_EVENT_EOF, udata_);
+						evcb_(this, fd_, IOEV_EVENT_EOF, 0, udata_);
 					}
 					return -1;
 				}
 			}
 			sendbytes += len;
-			totalbytes += len;
 			sendBuffer_->Move(nullptr, len);
 		}
 	}
 
-send_end:
-	if (wrcb_) {
-		wrcb_(this, fd_, 0, udata_);
+	return 0;
+}
+
+int BufferEventEv::sendTcpData(const void* data, size_t size)
+{
+	int ret = FlushSendBuffer();
+	if (ret < 0) {
+		return ret;
 	}
 
-	if (sendBuffer_->GetTotalLen() == 0) {
-		ev_io_stop(((IOEventEvHandler*)handler_)->GetEvLoop(), evwr_);
+	if (sendBuffer_->GetTotalLen() > 0) {
+		sendBuffer_->Insert(data, size);
+		return 0;
+	} else {
+		if (ev_is_active(evwr_)) {
+			ev_io_stop(((IOEventEvHandler*)handler_)->GetEvLoop(), evwr_);
+		}
 	}
+
+	size_t sendbytes = 0;
+	while (sendbytes < size) {
+		int len = send(fd_, (char*)data + sendbytes, size - sendbytes, 0);
+		if (len < 0) {
+			if (errno == EINTR) {
+				len = 0;
+			} else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				break;
+			} else {
+				if (evcb_) {
+					evcb_(this, fd_, IOEV_EVENT_EOF, 0, udata_);
+				}
+				return -1;
+			}
+		}
+		sendbytes += len;
+	}
+	if (sendbytes < size) {
+		sendBuffer_->Insert((char*)data + sendbytes, size - sendbytes);
+		ev_io_start(((IOEventEvHandler*)handler_)->GetEvLoop(), evwr_);
+	}
+
+	return 0;
+}
+
+int BufferEventEv::sendUdpData(uint64_t remote, const void* data, size_t size)
+{
+	struct sockaddr_in rmtaddr;
+	rmtaddr.sin_family = AF_INET;
+	rmtaddr.sin_addr.s_addr = remote >> 32;
+	rmtaddr.sin_port = remote & 0x00000000FFFFFFFF;
+	socklen_t rmtlen = sizeof(rmtaddr);
+
+	size_t sendlen = 0;
+	while (sendlen < size) {
+		sendlen = sendto(fd_, (char*)data + sendlen, size - sendlen, 0, (struct sockaddr*)&rmtaddr, rmtlen);
+		if (sendlen < 0) {
+			if (evcb_) {
+				evcb_(this, fd_, IOEV_EVENT_EOF, 0, udata_);
+				return -1;
+			}
+		}
+	}
+
+	if (wrcb_) {
+		wrcb_(this, fd_, 0, 0, udata_);
+	}
+
 	return 0;
 }
 
 ////////////////////////////////////////////////////////////
-ListenEventEv::ListenEventEv(IOEventHandler* ev, int lfd)
-	: ListenEvent(ev, lfd)
+ListenEventEv::ListenEventEv(IOEventHandler* ev, int protocol, int lfd)
+	: ListenEvent(ev, protocol, lfd)
 {
 	evio_ = nullptr;
 }
@@ -362,7 +472,7 @@ void ListenEventEv::Start()
 
 void ListenEventEv::DoCallback(int sockfd)
 {
-	listencb_(this, sockfd, 0, udata_);
+	listencb_(this, sockfd, udata_);
 }
 
 ////////////////////////////////////////////////////////////
@@ -386,7 +496,7 @@ void IOEventEvHandler::EvStop()
 	ev_break(evloop_, EVBREAK_ALL);
 }
 	
-int IOEventEvHandler::EvListenIP(const char* ip, int port, const OnEventCb& lcb, void* udata)
+int IOEventEvHandler::Bind(int protocol, const char* ip, int port)
 {
 	struct sockaddr_in addr;
 	memset((char*)&addr, 0, sizeof(addr));
@@ -396,10 +506,10 @@ int IOEventEvHandler::EvListenIP(const char* ip, int port, const OnEventCb& lcb,
 		return -1;
 	}
 
-	return doListen((struct sockaddr*)&addr, sizeof(addr), lcb, udata);
+	return doBind(protocol, (struct sockaddr*)&addr, sizeof(addr));
 }
 
-BufferEvent* IOEventEvHandler::ConnectIP(const char* ip, int port)
+BufferEvent* IOEventEvHandler::Connect(int protocol, const char* ip, int port)
 {
 	struct sockaddr_in peer;
 	memset(&peer, 0, sizeof(peer));
@@ -409,12 +519,18 @@ BufferEvent* IOEventEvHandler::ConnectIP(const char* ip, int port)
 		return nullptr;
 	}
 
-	return doConnect((struct sockaddr*)(&peer), sizeof(peer));
+	return doConnect(protocol, (struct sockaddr*)(&peer), sizeof(peer));
 }
 
-BufferEvent* IOEventEvHandler::NewBufferEvent(int sockfd)
+ListenEvent* IOEventEvHandler::NewListenEvent(int protocol, int sockfd)
 {
-	BufferEventEv* bev = new BufferEventEv(this, sockfd);
+	ListenEventEv* lev = new ListenEventEv(this, protocol, sockfd);
+	return lev;
+}
+
+BufferEvent* IOEventEvHandler::NewBufferEvent(int protocol, int sockfd)
+{
+	BufferEventEv* bev = new BufferEventEv(this, protocol, sockfd);
 	return bev;
 }
 
@@ -436,26 +552,28 @@ UserEvent* IOEventEvHandler::NewUserEvent()
 	return bev;
 }
 
-BufferEvent* IOEventEvHandler::doConnect(const struct sockaddr* sa, int socklen)
+BufferEvent* IOEventEvHandler::doConnect(int protocol, const struct sockaddr* sa, int socklen)
 {
-	int fd = socket(PF_INET, SOCK_STREAM, 0);
+	int socktype = protocol == IOEV_TCP_PROTOCOL ? SOCK_STREAM : SOCK_DGRAM;
+	int fd = socket(PF_INET, socktype, 0);
 	if (fd < 0) {
 		return nullptr;
 	}
 
-	if (connect(fd, sa, socklen) == -1) {
+	if (protocol == IOEV_TCP_PROTOCOL && connect(fd, sa, socklen) == -1) {
 		close(fd);
 		return nullptr;
 	}
 	setIOBlock(fd, 1);
 
-	BufferEvent* bev = NewBufferEvent(fd);
+	BufferEvent* bev = NewBufferEvent(protocol, fd);
 	return bev;
 }
 
-int IOEventEvHandler::doListen(const struct sockaddr* sa, int socklen, const OnEventCb& lcb, void* udata)
+int IOEventEvHandler::doBind(int protocol, const struct sockaddr* sa, int socklen)
 {
-	int lfd = socket(AF_INET, SOCK_STREAM, 0);
+	int socktype = protocol == IOEV_TCP_PROTOCOL ? SOCK_STREAM : SOCK_DGRAM;
+	int lfd = socket(AF_INET, socktype, 0);
 	if (lfd < 0) {
 		PLOG_ERROR("socket error in %d", errno);
 		return -1;
@@ -470,26 +588,19 @@ int IOEventEvHandler::doListen(const struct sockaddr* sa, int socklen, const OnE
 	}
 
 	int ret = bind(lfd, reinterpret_cast<const struct sockaddr*>(sa), socklen);
-	if (ret < 0) {
-		PLOG_ERROR("bind error in %d", errno);
-		close(lfd);
-		return -1;
+
+	if (ret == 0 && protocol == IOEV_TCP_PROTOCOL) {
+		ret = listen(lfd, 1024);
 	}
 
-	ret = listen(lfd, 1024);
 	if (ret < 0) {
 		PLOG_ERROR("listen error in %d", errno);
 		close(lfd);
 		return -1;
 	}
-	
-	ListenEventEv* lev = new ListenEventEv(this, lfd);
-	lev->SetCb(lcb, udata);
-	lev->Start();
 
-	PLOG_DEBUG("listen succ! fd=%d", lfd);
-	//printf("listen succ! fd=%d\n", lfd);
-	return 0;
+	PLOG_DEBUG("server bind succ! fd=%d", lfd);
+	return lfd;
 }
 
 

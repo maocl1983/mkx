@@ -1,16 +1,21 @@
 #pragma once
 #include <functional>
 
-enum {
+enum EventWatchType {
 	IOEV_READ = 0x01,
 	IOEV_WRITE = 0x02,
 };
 
-enum {
+enum EventStateType {
 	IOEV_EVENT_EOF			= 0x01,
 	IOEV_EVENT_ERROR		= 0x02,
 	IOEV_EVENT_TIMEOUT		= 0x04,
 	IOEV_EVENT_CONNECTED	= 0x08,
+};
+
+enum ProtocolType {
+	IOEV_TCP_PROTOCOL		= 0x01,
+	IOEV_UDP_PROTOCOL		= 0x02,
 };
 
 class IOEventHandler;
@@ -29,7 +34,9 @@ public:
 protected:
 	IOEventHandler*	handler_;
 };
-typedef std::function<void(EventBase*, int, int, void*)> OnEventCb;
+
+typedef std::function<void(EventBase*, int, void*)> OnEventCb;
+typedef std::function<void(EventBase*, int, int, uint64_t, void*)> OnBufferCb;
 
 // UserEvent
 class UserEvent : public EventBase {
@@ -91,15 +98,15 @@ protected:
 // BufferEvent
 class BufferEvent : public EventBase {
 public:
-	BufferEvent(IOEventHandler* handler, int fd) 
-		: EventBase(handler), fd_(fd) {}
+	BufferEvent(IOEventHandler* handler, int protocol, int fd) 
+		: EventBase(handler), fd_(fd), protocol_(protocol) {}
 	virtual ~BufferEvent() {}
 
 	int GetFd() {
 		return fd_;
 	}
 
-	virtual void SetCb(const OnEventCb& rcb, const OnEventCb& wcb, const OnEventCb& evcb, void* arg) {
+	virtual void SetCb(const OnBufferCb& rcb, const OnBufferCb& wcb, const OnBufferCb& evcb, void* arg) {
 		rdcb_ = rcb;
 		wrcb_ = wcb;
 		evcb_ = evcb;
@@ -113,21 +120,22 @@ public:
 	virtual size_t GetReadBuffLen() = 0;
 
 	virtual size_t Read(void* data, size_t size) = 0;
-	virtual int Write(const void* data, size_t size) = 0;
+	virtual int Write(uint64_t remote, const void* data, size_t size) = 0;
 
 protected:
 	int					fd_;
-	OnEventCb			rdcb_;
-	OnEventCb			wrcb_;
-	OnEventCb			evcb_;
+	int					protocol_;
+	OnBufferCb			rdcb_;
+	OnBufferCb			wrcb_;
+	OnBufferCb			evcb_;
 	void*				udata_;
 };
 
 // ListenEvent
 class ListenEvent : public EventBase {
 public:
-	ListenEvent(IOEventHandler* handler, int lfd)
-		: EventBase(handler), lfd_(lfd) {}
+	ListenEvent(IOEventHandler* handler, int protocol, int lfd)
+		: EventBase(handler), lfd_(lfd), protocol_(protocol) {}
 	~ListenEvent() {}
 
 	void SetCb(const OnEventCb& lcb, void* arg) {
@@ -143,6 +151,7 @@ public:
 
 protected:
 	int					lfd_;
+	int					protocol_;
 	OnEventCb			listencb_;
 	void* 				udata_;
 };
@@ -156,10 +165,11 @@ public:
 	virtual void EvRun() = 0;
 	virtual void EvStop() = 0;
 
-	virtual int EvListenIP(const char* ip, int port, const OnEventCb& lcb, void* udata) = 0;
-	virtual BufferEvent* ConnectIP(const char* ip, int port) = 0;
+	virtual int Bind(int protcol, const char* ip, int port) = 0;
+	virtual BufferEvent* Connect(int protocol, const char* ip, int port) = 0;
 
-	virtual BufferEvent* NewBufferEvent(int fd) = 0;
+	virtual ListenEvent* NewListenEvent(int protocol, int fd) = 0;
+	virtual BufferEvent* NewBufferEvent(int protocol, int fd) = 0;
 	virtual TimerEvent* NewTimerEvent() = 0;
 	virtual SignalEvent* NewSignalEvent(int signal) = 0;
 	virtual UserEvent* NewUserEvent() = 0;

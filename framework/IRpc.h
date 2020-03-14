@@ -25,7 +25,7 @@ class Server;
 class IRpcService;
 class IRpc {
 public:
-	typedef std::function<int(int, const char*, int)> OnRpcRequest;
+	typedef std::function<int(int, int64_t, const char*, int)> OnRpcRequest;
 	typedef std::function<int(int, int, const char*, int)> OnRpcRespond;
 	typedef std::function<int(int, std::string&, const char*, int)> OnRequest;
 	typedef std::map<std::string, OnRpcRequest> RequestMap;
@@ -40,13 +40,13 @@ public:
 	int AddRequestFunction(const std::string& name, const OnRpcRequest& func);
 	int AddRespondFunction(const std::string& name, const OnRpcRespond& func);
 	int SetRequestFunction(const OnRequest& func);
-	int OnRecvCliMsg(int fd, const char* msg, int msglen);
+	int OnRecvCliMsg(int fd, uint64_t remote, const char* msg, int msglen);
 	int OnRecvSvrMsg(int fd, const char* msg, int msglen);
 
 	template<typename Class>
 	int AddService(Class* service);
 	
-	int SendRespond(int fd, int ret, const std::string& name, int datalen);
+	int SendRespond(int fd, uint64_t remote, int ret, const std::string& name, int datalen);
 	int SendRequest(int fd, const std::string& name, int datalen);
 
 private:

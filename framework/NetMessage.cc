@@ -23,16 +23,17 @@ enum ConnType {
 typedef struct conn_info {
 	int				fd;
 	int				ctype;
+	int				protocol;
 	BufferEvent*	bev;
 } conn_info_t;
 
-static void msgEventCb(EventBase* ev, int fd, int events, void* arg)
+static void msgEventCb(EventBase* ev, int events, void* arg)
 {
 	NetMessage* net = (NetMessage*)arg;
 	net->OnSendMsgEvent();
 }
 
-static void eventCb(EventBase* ev, int fd, int events, void* arg)
+static void eventCb(EventBase* ev, int fd, int events, uint64_t remote, void* arg)
 {
 	NetMessage* net = (NetMessage*)arg;
 	if (events == IOEV_EVENT_EOF) {
@@ -40,30 +41,29 @@ static void eventCb(EventBase* ev, int fd, int events, void* arg)
 	}
 }
 
-static void writeCb(EventBase* ev, int fd, int events, void* arg)
+static void writeCb(EventBase* ev, int fd, int events, uint64_t remote, void* arg)
 {
 	//NetMessage* net = (NetMessage*)arg;
 	//net->RecvMsg(fd);
 }
 
-static void readCb(EventBase* ev, int fd, int events, void* arg)
+static void readCb(EventBase* ev, int fd, int events, uint64_t remote, void* arg)
 {
 	NetMessage* net = (NetMessage*)arg;
-	net->RecvMsg(fd);
+	net->RecvMsg(fd, remote);
 }
 
-static void listenCb(EventBase* ev, int fd, int events, void* arg)
+static void listenCb(EventBase* ev, int fd, void* arg)
 {
 	NetMessage* net = (NetMessage*)arg;
 	ListenEvent* lev = (ListenEvent*)ev;
+	int lfd = lev->GetListenFd();
 
 	IOEventHandler* evhandler = net->GetIOEventHandler();
-	BufferEvent* bev = evhandler->NewBufferEvent(fd);
-	if (!bev) {
-		return;
-	}
+	BufferEvent* bev = evhandler->NewBufferEvent(IOEV_TCP_PROTOCOL, fd);
+	assert(bev);
 
-	if (net->OpenConn(fd, bev, lev->GetListenFd()) != 0) {
+	if (net->OpenConn(fd, bev, IOEV_TCP_PROTOCOL, lfd) != 0) {
 		delete bev;
 		return;
 	}
@@ -118,24 +118,40 @@ IOEventHandler* NetMessage::GetIOEventHandler()
 	return server_->GetIOEvHandler();
 }
 
-int NetMessage::Listen(const char* ip, int port)
+int NetMessage::Bind(int protocol, const char* ip, int port)
 {
-	if (GetIOEventHandler()->EvListenIP(ip, port, listenCb, this) != 0) {
+	IOEventHandler* evhandler = GetIOEventHandler();
+	int fd = evhandler->Bind(protocol, ip, port);
+	if (fd < 0) {
 		return -1;
+	}
+
+	if (protocol == IOEV_TCP_PROTOCOL) {
+		ListenEvent* lev = evhandler->NewListenEvent(protocol, fd);
+		lev->SetCb(listenCb, this);
+		lev->Start();
+	} else {
+		BufferEvent* bev = evhandler->NewBufferEvent(protocol, fd);
+		if (OpenConn(fd, bev, protocol, fd)) {
+			delete bev;
+			return -1;
+		}	
+		bev->SetCb(readCb, writeCb, eventCb, this);
+		bev->Enable(IOEV_READ | IOEV_WRITE);
 	}
 
 	return 0;
 }
 
-int NetMessage::Connect(const char* ip, int port)
+int NetMessage::Connect(int protocol, const char* ip, int port)
 {
-	BufferEvent* bev = GetIOEventHandler()->ConnectIP(ip, port);
+	BufferEvent* bev = GetIOEventHandler()->Connect(protocol, ip, port);
 	if (!bev) {
 		return -1;
 	}
 	
 	int fd = bev->GetFd();
-	if (OpenConn(fd, bev) != 0) {
+	if (OpenConn(fd, bev, protocol) != 0) {
 		delete bev;
 		fd = -1;
 	}
@@ -143,7 +159,7 @@ int NetMessage::Connect(const char* ip, int port)
 	return fd;
 }
 
-int NetMessage::SendMsg(int fd, const char* msg, int msglen)
+int NetMessage::SendMsg(int fd, uint64_t remote, const char* msg, int msglen)
 {
 	conn_info_t* conn = GetConn(fd);
 	if (!conn) {
@@ -151,7 +167,7 @@ int NetMessage::SendMsg(int fd, const char* msg, int msglen)
 	}
 	assert(conn->bev->GetFd() == fd);
 
-	return conn->bev->Write(msg, msglen);
+	return conn->bev->Write(remote, msg, msglen);
 }
 
 int NetMessage::OnConnClosed(int fd)
@@ -159,7 +175,7 @@ int NetMessage::OnConnClosed(int fd)
 	return CloseConn(fd);
 }
 
-int NetMessage::OpenConn(int fd, BufferEvent* bev, int listenfd)
+int NetMessage::OpenConn(int fd, BufferEvent* bev, int protocol, int listenfd)
 {
 	if (fd >= maxfds_ || fd < 0) {
 		return -1;
@@ -172,12 +188,15 @@ int NetMessage::OpenConn(int fd, BufferEvent* bev, int listenfd)
 	ConnType ctype = CONN_TYPE_SVR;
 	if (listenfd > 0) {
 		ctype = CONN_TYPE_CLI;
-		server_->OnCliConnected(fd);
+		if (protocol == IOEV_TCP_PROTOCOL) {
+			server_->OnCliConnected(fd);
+		}
 	}
 
 	conns_[fd].fd = fd;
 	conns_[fd].bev = bev;
 	conns_[fd].ctype = ctype;
+	conns_[fd].protocol = protocol;
 
 	return 0;
 }
@@ -222,52 +241,20 @@ int NetMessage::CloseConn(int fd)
 	return 0;
 }
 
-int NetMessage::RecvMsg(int fd)
+int NetMessage::RecvMsg(int fd, uint64_t remote)
 {
 	conn_info_t* conn = GetConn(fd);
 	if (!conn) {
 		return -1;
 	}
 
-	char lenbuff[4];
-	BufferEvent* bev = conn->bev;
-	int copylen = bev->CopyReadBuff(lenbuff, 4);
-	if (copylen != 4) {
-		return -1;
-	}
-
-	uint32_t reallen = ntohl(*(uint32_t*)lenbuff);
-	if (reallen > maxMsglen_) {
-		PLOG_ERROR("recv msg len error! len=%u maxlen=%u", reallen, maxMsglen_);
-		return -1;
-	}
-	if (reallen > bev->GetReadBuffLen()) {
-		return 0;
-	}
-
-	MsgType mtype = MT_CLI_MESSAGE;
-	if (conns_[fd].ctype == CONN_TYPE_SVR) {
-		mtype = MT_SVR_MESSAGE;
-	}
-
-	if (server_->ModeType() == SERVER_MODE_SINGLE) {
-		bev->Read(recvBuffer_, reallen);
-		server_->OnRecvMsg(fd, recvBuffer_, reallen, mtype == MT_CLI_MESSAGE);
+	if (conn->protocol == IOEV_TCP_PROTOCOL) {
+		while (recvTcpMsg(conn) > 0);
 	} else {
-		char* buffer = recvQue_->BufferForPush(fd, mtype, reallen);
-		if (!buffer) {
-			PLOG_ERROR("deal msg error while push to queue! fd=%d", fd);
-			return -1;
-		}
-		bev->Read(buffer, reallen);
-		recvQue_->PushFinish(reallen);
-
-		MutexLocker* locker = server_->GetRecvLocker();
-		locker->Lock();
-		locker->Signal();
-		locker->Unlock();
+		while (recvUdpMsg(conn, remote) > 0);
 	}
-	return reallen;
+
+	return 0;
 }
 
 void NetMessage::SendQueNoti()
@@ -284,11 +271,103 @@ void NetMessage::OnSendMsgEvent()
 
 	block_t* block;
 	while (sendq->FrontBlock(&block)) {
-		if (block->type == MT_SVR_MESSAGE) {
-			SendMsg(block->fd, block->data, block->datalen);
+		if (block->type == MT_SVR_MESSAGE || block->type == MT_CLI_MESSAGE) {
+			SendMsg(block->fd, block->remote, block->data, block->datalen);
 		}
 		sendq->PopBlock(block->len);
 	}
 }
+
+int NetMessage::recvTcpMsg(struct conn_info* conn)
+{
+	char lenbuff[4];
+	int fd = conn->fd;
+	BufferEvent* bev = conn->bev;
+	
+	int copylen = bev->CopyReadBuff(lenbuff, 4);
+	if (copylen != 4) {
+		return -1;
+	}
+
+	uint32_t reallen = ntohl(*(uint32_t*)lenbuff);
+	if (reallen > maxMsglen_) {
+		PLOG_ERROR("recv msg len error! len=%u maxlen=%u", reallen, maxMsglen_);
+		return -1;
+	}
+	if (reallen > bev->GetReadBuffLen()) {
+		return 0;
+	}
+
+	MessageType mtype = MT_CLI_MESSAGE;
+	if (conns_[fd].ctype == CONN_TYPE_SVR) {
+		mtype = MT_SVR_MESSAGE;
+	}
+
+	if (server_->ModeType() == SERVER_MODE_SINGLE) {
+		bev->Read(recvBuffer_, reallen);
+		server_->OnRecvMsg(fd, 0, recvBuffer_, reallen, mtype == MT_CLI_MESSAGE);
+	} else {
+		char* buffer = recvQue_->BufferForPush(fd, 0, mtype, reallen);
+		if (!buffer) {
+			PLOG_ERROR("deal msg error while push to queue! fd=%d", fd);
+			return -1;
+		}
+		bev->Read(buffer, reallen);
+		recvQue_->PushFinish(reallen);
+
+		MutexLocker* locker = server_->GetRecvLocker();
+		locker->Lock();
+		locker->Signal();
+		locker->Unlock();
+	}
+	
+	return reallen;
+}
+
+int NetMessage::recvUdpMsg(struct conn_info* conn, uint64_t remote)
+{
+	char lenbuff[4];
+	int fd = conn->fd;
+	BufferEvent* bev = conn->bev;
+	int copylen = bev->CopyReadBuff(lenbuff, 4);
+	if (copylen != 4) {
+		return -1;
+	}
+
+	uint32_t reallen = ntohl(*(uint32_t*)lenbuff);
+	if (reallen > maxMsglen_) {
+		PLOG_ERROR("recv msg len error! len=%u maxlen=%u", reallen, maxMsglen_);
+		return -1;
+	}
+	if (reallen > bev->GetReadBuffLen()) {
+		return 0;
+	}
+
+	MessageType mtype = MT_CLI_MESSAGE;
+	if (conns_[fd].ctype == CONN_TYPE_SVR) {
+		mtype = MT_SVR_MESSAGE;
+	}
+
+	if (server_->ModeType() == SERVER_MODE_SINGLE) {
+		bev->Read(recvBuffer_, reallen);
+		server_->OnRecvMsg(fd, remote, recvBuffer_, reallen, mtype == MT_CLI_MESSAGE);
+	} else {
+		char* buffer = recvQue_->BufferForPush(fd, remote, mtype, reallen);
+		if (!buffer) {
+			PLOG_ERROR("deal msg error while push to queue! fd=%d", fd);
+			return -1;
+		}
+		bev->Read(buffer, reallen);
+		recvQue_->PushFinish(reallen);
+
+		MutexLocker* locker = server_->GetRecvLocker();
+		locker->Lock();
+		locker->Signal();
+		locker->Unlock();
+	}
+	
+	return reallen;
+}
+
 
 

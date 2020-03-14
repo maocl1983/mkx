@@ -4,6 +4,7 @@
 import client
 import game_pb2
 
+#sock = client.UdpSocket("172.27.0.7", 8812)
 sock = client.Socket("172.27.0.7", 8812)
 sock.connect()
 for i in range(1000):
